@@ -1,0 +1,296 @@
+using System.Windows;
+using System.IO;
+using System.Windows.Threading;
+using System.Runtime.InteropServices;
+using QuotaRing.Core;
+
+namespace QuotaRing;
+
+public enum DemoMode { None, Single, Dual, Offline, Low }
+
+public static class DemoModeExtensions
+{
+    public static DemoMode Parse(string[] args)
+    {
+        var index = Array.FindIndex(args, value => value.Equals("--demo", StringComparison.OrdinalIgnoreCase));
+        if (index < 0 || index + 1 >= args.Length) return DemoMode.None;
+        return Enum.TryParse<DemoMode>(args[index + 1], true, out var mode) ? mode : DemoMode.None;
+    }
+}
+
+public sealed class AppController : IAsyncDisposable
+{
+    private readonly ClaudeUsageSource _claudeSource = new();
+    private readonly TaskbarLocator _locator = new();
+    private readonly DispatcherTimer _watchTimer;
+    private readonly DispatcherTimer _syncTimer;
+    private readonly DispatcherTimer _memoryTimer;
+    private readonly DispatcherTimer _zOrderTimer;
+    private readonly ForegroundWatcher _foregroundWatcher = new();
+    private readonly List<MainWindow> _windows = [];
+    private readonly DemoMode _demo;
+    private readonly AppSettings _settings;
+    private AppServerQuotaSource? _quotaSource;
+    private QuotaSnapshot _snapshot = QuotaSnapshot.Offline();
+    private QuotaSnapshot _claudeSnapshot = QuotaSnapshot.Offline("尚未收到 Claude Code 額度");
+    private bool _refreshing;
+    private int _failureCount;
+    private readonly ClaudeAccountSwitcher _accountSwitcher;
+    private string? _claudeAccountName;
+    private readonly CodexAccountSwitcher _codexAccountSwitcher;
+    private string? _codexAccountName;
+    private bool _codexSwitching;
+
+    public AppController(AppSettings settings, DemoMode demo)
+    {
+        _settings = settings.Normalize();
+        _demo = demo;
+        _accountSwitcher = new ClaudeAccountSwitcher(async () =>
+        {
+            _claudeSnapshot = _claudeSource.Reset();
+            foreach (var window in _windows) window.UpdateSnapshot(_snapshot, _claudeSnapshot, _claudeAccountName, _codexAccountName);
+            while (_refreshing) await Task.Delay(50);
+            _claudeSource.Reset();
+        }, async (name, token) =>
+        {
+            while (_refreshing) await Task.Delay(50, token);
+            token.ThrowIfCancellationRequested();
+            _claudeSnapshot = _claudeSource.Reset();
+            _claudeAccountName = name;
+            foreach (var window in _windows) window.UpdateSnapshot(_snapshot, _claudeSnapshot, _claudeAccountName, _codexAccountName);
+            await RefreshAsync(afterAccountSwitch: true, token);
+        });
+        _codexAccountSwitcher = new CodexAccountSwitcher(async () =>
+        {
+            _codexSwitching = true;
+            _snapshot = QuotaSnapshot.Offline("切換帳號中");
+            foreach (var window in _windows) window.UpdateSnapshot(_snapshot, _claudeSnapshot, _claudeAccountName, _codexAccountName);
+            while (_refreshing) await Task.Delay(50);
+            var source = _quotaSource;
+            _quotaSource = null;
+            if (source is not null) await source.DisposeAsync();
+        }, async (name, token) =>
+        {
+            _codexSwitching = true;
+            while (_refreshing) await Task.Delay(50, token);
+            token.ThrowIfCancellationRequested();
+            var source = _quotaSource;
+            _quotaSource = null;
+            if (source is not null) await source.DisposeAsync();
+            _codexAccountName = name;
+            _codexSwitching = false;
+            await RefreshAsync(afterAccountSwitch: true, token);
+        });
+        _watchTimer = new DispatcherTimer(TimeSpan.FromSeconds(1), DispatcherPriority.Background, async (_, _) => await RunGuardedAsync(WatchAsync), Application.Current.Dispatcher);
+        _syncTimer = new DispatcherTimer(TimeSpan.FromSeconds(15), DispatcherPriority.Background, async (_, _) => await RunGuardedAsync(() => RefreshAsync()), Application.Current.Dispatcher);
+        _memoryTimer = new DispatcherTimer(TimeSpan.FromSeconds(30), DispatcherPriority.ApplicationIdle, (_, _) => MemoryTrimmer.Trim(), Application.Current.Dispatcher);
+        _zOrderTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(50), DispatcherPriority.Send, (_, _) =>
+        {
+            foreach (var window in _windows) window.BringAboveTaskbar();
+        }, Application.Current.Dispatcher);
+        _foregroundWatcher.ForegroundChanged += (_, _) => Application.Current.Dispatcher.BeginInvoke(() =>
+        {
+            foreach (var window in _windows) window.BringAboveTaskbar();
+        }, DispatcherPriority.Send);
+    }
+
+    public async Task StartAsync()
+    {
+        if (_demo != DemoMode.None)
+        {
+            _snapshot = CreateDemo(_demo);
+            _claudeSnapshot = CreateDemo(_demo, true);
+            EnsureWindows();
+            _memoryTimer.Start();
+            _zOrderTimer.Start();
+            _ = Task.Delay(TimeSpan.FromSeconds(2)).ContinueWith(_ => Application.Current.Dispatcher.Invoke(MemoryTrimmer.Trim));
+            return;
+        }
+
+        _claudeAccountName = await Task.Run(() =>
+        {
+            var active = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude-accounts", "active.txt");
+            return File.Exists(active) ? File.ReadAllText(active) : null;
+        });
+        _codexAccountName = await Task.Run(() => CodexAccountSwitcher.CreateStore().Active);
+        _watchTimer.Start();
+        _memoryTimer.Start();
+        _zOrderTimer.Start();
+        await WatchAsync();
+    }
+
+    private async Task WatchAsync()
+    {
+        EnsureWindows();
+        if (!_syncTimer.IsEnabled) _syncTimer.Start();
+        if (_quotaSource is null) await RefreshAsync();
+    }
+
+    private void EnsureWindows()
+    {
+        var taskbars = _locator.LocateAll();
+        while (_windows.Count < taskbars.Count)
+        {
+            var window = new MainWindow();
+            if (_demo == DemoMode.None) window.AddClaudeAccountItemsAsync = _accountSwitcher.AddMenuItemsAsync;
+            if (_demo == DemoMode.None) window.AddCodexAccountItemsAsync = _codexAccountSwitcher.AddMenuItemsAsync;
+            window.RefreshRequested += async (_, _) => await RefreshAsync();
+            window.ExitRequested += (_, _) => Application.Current.Shutdown();
+            _windows.Add(window);
+            window.Show();
+        }
+
+        for (var index = 0; index < _windows.Count; index++)
+        {
+            if (index >= taskbars.Count)
+            {
+                _windows[index].Hide();
+                continue;
+            }
+            var taskbar = taskbars[index];
+            if (taskbar.Bottom - taskbar.Top < 10 || FullscreenDetector.IsFullscreenOn(taskbar))
+            {
+                _windows[index].Hide();
+                continue;
+            }
+            _windows[index].UpdateSnapshot(_snapshot, _claudeSnapshot, _claudeAccountName, _codexAccountName);
+            if (!_windows[index].IsVisible) _windows[index].Show();
+            _windows[index].Place(taskbar);
+        }
+    }
+
+    private void HideWindows()
+    {
+        foreach (var window in _windows) window.Hide();
+    }
+
+    private async Task RefreshAsync(bool afterAccountSwitch = false, CancellationToken cancellationToken = default)
+    {
+        if (_demo != DemoMode.None || _refreshing || ((_accountSwitcher.IsBusy || _codexAccountSwitcher.IsBusy || _codexSwitching) && !afterAccountSwitch)) return;
+        _refreshing = true;
+        try
+        {
+            var claude = await _claudeSource.ReadAsync(DateTimeOffset.UtcNow);
+            if (!cancellationToken.IsCancellationRequested && (!_accountSwitcher.IsBusy || afterAccountSwitch)) _claudeSnapshot = claude;
+            _quotaSource ??= CreateSource();
+            var snapshot = await _quotaSource.ReadAsync();
+            if (!_codexSwitching) _snapshot = snapshot;
+            if (_snapshot.Error is null)
+            {
+                _failureCount = 0;
+                _syncTimer.Interval = TimeSpan.FromSeconds(15);
+            }
+            else
+            {
+                var delays = new[] { 5, 15, 30, 60 };
+                _syncTimer.Interval = TimeSpan.FromSeconds(delays[Math.Min(_failureCount, delays.Length - 1)]);
+                _failureCount++;
+            }
+            foreach (var window in _windows) window.UpdateSnapshot(_snapshot, _claudeSnapshot, _claudeAccountName, _codexAccountName);
+        }
+        finally
+        {
+            _refreshing = false;
+        }
+    }
+
+    private async Task RunGuardedAsync(Func<Task> operation)
+    {
+        try
+        {
+            await operation();
+        }
+        catch (Exception exception)
+        {
+            _snapshot = _snapshot.OrderedWindows.Count > 0
+                ? _snapshot with { IsStale = true, Error = exception.Message }
+                : QuotaSnapshot.Offline(exception.Message);
+            foreach (var window in _windows) window.UpdateSnapshot(_snapshot, _claudeSnapshot, _claudeAccountName, _codexAccountName);
+        }
+    }
+
+    private AppServerQuotaSource CreateSource()
+    {
+        var source = new AppServerQuotaSource();
+        source.SnapshotChanged += (_, snapshot) => Application.Current.Dispatcher.Invoke(() =>
+        {
+            if (_codexSwitching || !ReferenceEquals(_quotaSource, source)) return;
+            _snapshot = snapshot;
+            foreach (var window in _windows) window.UpdateSnapshot(snapshot, _claudeSnapshot, _claudeAccountName, _codexAccountName);
+        });
+        return source;
+    }
+
+    private static QuotaSnapshot CreateDemo(DemoMode mode, bool claude = false)
+    {
+        var reset = DateTimeOffset.UtcNow.AddHours(4).ToUnixTimeSeconds();
+        return mode switch
+        {
+            DemoMode.Single => new(new RateLimitWindow(claude ? 32 : 17, 10080, reset), null, null, DateTimeOffset.UtcNow),
+            DemoMode.Dual => new(new RateLimitWindow(claude ? 12 : 24, 300, reset), new RateLimitWindow(claude ? 27 : 41, 10080, reset), null, DateTimeOffset.UtcNow),
+            DemoMode.Low => new(new RateLimitWindow(claude ? 86 : 92, 300, reset), new RateLimitWindow(claude ? 95 : 83, 10080, reset), null, DateTimeOffset.UtcNow),
+            _ => QuotaSnapshot.Offline("示範離線狀態")
+        };
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _accountSwitcher.CancelLogin();
+        _codexAccountSwitcher.CancelLogin();
+        _watchTimer.Stop();
+        _syncTimer.Stop();
+        _memoryTimer.Stop();
+        _zOrderTimer.Stop();
+        _foregroundWatcher.Dispose();
+        foreach (var window in _windows) window.Close();
+        if (_quotaSource is not null) await _quotaSource.DisposeAsync();
+    }
+}
+
+internal sealed class ForegroundWatcher : IDisposable
+{
+    private const uint EventSystemForeground = 0x0003;
+    private const uint WineventOutofcontext = 0x0000;
+    private const uint WineventSkipownprocess = 0x0002;
+    private readonly WinEventDelegate _callback;
+    private readonly nint _hook;
+
+    public ForegroundWatcher()
+    {
+        _callback = (_, _, _, _, _, _, _) => ForegroundChanged?.Invoke(this, EventArgs.Empty);
+        _hook = SetWinEventHook(EventSystemForeground, EventSystemForeground, 0, _callback, 0, 0,
+            WineventOutofcontext | WineventSkipownprocess);
+    }
+
+    public event EventHandler? ForegroundChanged;
+
+    public void Dispose()
+    {
+        if (_hook != 0) _ = UnhookWinEvent(_hook);
+    }
+
+    private delegate void WinEventDelegate(nint hook, uint eventType, nint window, int objectId, int childId, uint threadId, uint eventTime);
+
+    [DllImport("user32.dll")]
+    private static extern nint SetWinEventHook(uint eventMin, uint eventMax, nint module, WinEventDelegate callback,
+        uint processId, uint threadId, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern bool UnhookWinEvent(nint hook);
+}
+
+internal static class MemoryTrimmer
+{
+    public static void Trim()
+    {
+        GC.Collect(2, GCCollectionMode.Optimized, blocking: false, compacting: false);
+        _ = EmptyWorkingSet(GetCurrentProcess());
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern nint GetCurrentProcess();
+
+    [DllImport("psapi.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EmptyWorkingSet(nint process);
+}

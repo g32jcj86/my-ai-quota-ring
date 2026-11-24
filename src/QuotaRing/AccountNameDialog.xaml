@@ -1,0 +1,53 @@
+<Window x:Class="QuotaRing.AccountNameDialog" x:ClassModifier="internal" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Width="400" SizeToContent="Height" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ResizeMode="NoResize" WindowStartupLocation="CenterScreen" Topmost="True" FontFamily="Microsoft JhengHei UI, Segoe UI" FontSize="13" Foreground="{DynamicResource Primary}" Icon="Assets/app.ico">
+    <Window.Resources>
+        <SolidColorBrush x:Key="Card" Color="#1F2028"/>
+        <SolidColorBrush x:Key="Edge" Color="#34363F"/>
+        <SolidColorBrush x:Key="Primary" Color="#F2F2F5"/>
+        <SolidColorBrush x:Key="Secondary" Color="#A0A3AD"/>
+        <SolidColorBrush x:Key="InputBackground" Color="#16171D"/>
+        <Style TargetType="Button">
+            <Setter Property="Height" Value="34"/><Setter Property="MinWidth" Value="88"/>
+            <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{DynamicResource Primary}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Edge}"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+                <Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+                <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Surface" Property="Background" Value="{DynamicResource Edge}"/></Trigger>
+                    <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="#D97757"/></Trigger>
+                    <MultiTrigger><MultiTrigger.Conditions><Condition Property="IsDefault" Value="True"/><Condition Property="IsMouseOver" Value="True"/></MultiTrigger.Conditions><Setter TargetName="Surface" Property="Background" Value="#C4673F"/></MultiTrigger>
+                </ControlTemplate.Triggers>
+            </ControlTemplate></Setter.Value></Setter>
+        </Style>
+    </Window.Resources>
+    <Border Margin="16" Padding="24" Background="{DynamicResource Card}" BorderBrush="{DynamicResource Edge}" BorderThickness="1" CornerRadius="12">
+        <Border.Effect><DropShadowEffect BlurRadius="24" Opacity="0.35" ShadowDepth="2"/></Border.Effect>
+        <StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" MouseLeftButtonDown="DragTitle" Background="Transparent">
+                    <Image x:Name="Logo" Width="28" Height="28" Margin="0,0,10,0"/>
+                    <TextBlock x:Name="Heading" FontSize="21.333" FontWeight="Bold" VerticalAlignment="Center"/>
+                </StackPanel>
+                <Button Grid.Column="1" Content="×" MinWidth="28" Width="28" Height="28" BorderThickness="0" IsCancel="True" FontSize="20" ToolTip="關閉"/>
+            </Grid>
+            <TextBlock x:Name="Description" Margin="0,18,0,0" Foreground="{DynamicResource Secondary}" TextWrapping="Wrap" LineHeight="21"/>
+            <TextBlock x:Name="Email" Margin="0,6,0,0" Foreground="{DynamicResource Secondary}" TextWrapping="Wrap"/>
+            <Grid Margin="0,18,0,0">
+                <TextBox x:Name="Input" Height="36" Padding="10,0" VerticalContentAlignment="Center" Background="{DynamicResource InputBackground}" Foreground="{DynamicResource Primary}" CaretBrush="{DynamicResource Primary}">
+                    <TextBox.Template><ControlTemplate TargetType="TextBox">
+                        <Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="{DynamicResource Edge}" BorderThickness="1" CornerRadius="8"><ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center"/></Border>
+                        <ControlTemplate.Triggers><Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="#D97757"/></Trigger></ControlTemplate.Triggers>
+                    </ControlTemplate></TextBox.Template>
+                </TextBox>
+                <TextBlock Text="例如：個人、公司" Margin="11,0" VerticalAlignment="Center" Foreground="{DynamicResource Secondary}" IsHitTestVisible="False">
+                    <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=Input}" Value=""><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
+                </TextBlock>
+            </Grid>
+            <TextBlock x:Name="Error" Foreground="#E5484D" TextWrapping="Wrap" Margin="0,8,0,0" Visibility="Collapsed"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,24,0,0">
+                <Button Content="取消" IsCancel="True" Margin="0,0,10,0"/>
+                <Button Content="確定" IsDefault="True" Background="#D97757" BorderBrush="#D97757" Foreground="White" Click="Confirm"/>
+            </StackPanel>
+        </StackPanel>
+    </Border>
+</Window>

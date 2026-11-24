@@ -1,0 +1,27 @@
+bin/
+obj/
+TestResults/
+coverage.*.xml
+artifacts/
+work/
+.vs/
+*.user
+*.suo
+.agents/
+data/
+
+# Local credentials and diagnostics
+.env
+.env.*
+.claude/
+.codex/
+.claude-accounts/
+.codex-accounts/
+.credentials.json
+auth.json
+oauth.json
+*.log
+*.pem
+*.key
+*.pfx
+*.p12
